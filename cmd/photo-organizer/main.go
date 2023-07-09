@@ -26,6 +26,8 @@ func main() {
 
 	slog.Info("starting", slog.String("source", sourceDir), slog.String("destination", destDir))
 
+	imgPaths := []string{}
+
 	err := filepath.WalkDir(sourceDir, func(p string, entry fs.DirEntry, _ error) error {
 		if entry.IsDir() {
 			slog.Info("path is a dir, skipping", slog.String("path", p))
@@ -39,43 +41,7 @@ func main() {
 			return nil
 		}
 
-		imgContent, err := ioutil.ReadFile(p)
-		if err != nil {
-			return fmt.Errorf("error opening image %s: %v", p, err)
-		}
-
-		imgExif, err := img.ExtractExif(imgContent)
-		if err != nil {
-			return fmt.Errorf("error extracting image EXIF: %v", err)
-		}
-
-		slog.Info("image EXIF", slog.String("model", imgExif.Model), slog.Any("date", imgExif.TimeDate))
-
-		year := imgExif.TimeDate.Year()
-		month := fmt.Sprintf("%02d", imgExif.TimeDate.Month())
-		imgDestDir := fmt.Sprintf("%d/%s", year, month)
-
-		slog.Info("final destination", slog.String("path", imgDestDir))
-
-		imgName := fmt.Sprintf("%s-%s%s",
-			imgExif.TimeDate.Format("2006-01-02-030405"),
-			strings.ToLower(strings.Trim(imgExif.Model, "\"")),
-			strings.ToLower(path.Ext(entry.Name())),
-		)
-
-		fileDestDir := fmt.Sprintf("%s/%s", destDir, imgDestDir)
-		err = os.MkdirAll(fileDestDir, os.ModePerm)
-		if err != nil {
-			return fmt.Errorf("error crating the dir %s: %v", fileDestDir, err)
-		}
-
-		imgPath := fmt.Sprintf("%s/%s", fileDestDir, imgName)
-		err = ioutil.WriteFile(imgPath, imgContent, 0777)
-		if err != nil {
-			return fmt.Errorf("error copying file %s: %v", fileDestDir, err)
-		}
-
-		slog.Info("image copied", slog.String("path", imgPath))
+		imgPaths = append(imgPaths, p)
 
 		return nil
 	})
@@ -83,6 +49,53 @@ func main() {
 		log.Fatalf("\n %v", err)
 	}
 
+	for _, imgPath := range imgPaths {
+		copyImage(imgPath, destDir)
+	}
+}
+
+// copyImage copy the image to the destination directory,
+// with the standard name and directory structure.
+func copyImage(origImgPath string, destDir string) error {
+	imgContent, err := ioutil.ReadFile(origImgPath)
+	if err != nil {
+		return fmt.Errorf("error opening image %s: %v", origImgPath, err)
+	}
+
+	imgExif, err := img.ExtractExif(imgContent)
+	if err != nil {
+		return fmt.Errorf("error extracting image EXIF: %v", err)
+	}
+
+	slog.Info("image EXIF", slog.String("model", imgExif.Model), slog.Any("date", imgExif.TimeDate))
+
+	year := imgExif.TimeDate.Year()
+	month := fmt.Sprintf("%02d", imgExif.TimeDate.Month())
+	imgDestDir := fmt.Sprintf("%d/%s", year, month)
+
+	slog.Info("final destination", slog.String("path", imgDestDir))
+
+	imgName := fmt.Sprintf("%s-%s%s",
+		imgExif.TimeDate.Format("2006-01-02-030405"),
+		strings.ToLower(strings.Trim(imgExif.Model, "\"")),
+		strings.ToLower(path.Ext(origImgPath)),
+	)
+
+	fileDestDir := fmt.Sprintf("%s/%s", destDir, imgDestDir)
+	err = os.MkdirAll(fileDestDir, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("error crating the dir %s: %v", fileDestDir, err)
+	}
+
+	copyImgPath := fmt.Sprintf("%s/%s", fileDestDir, imgName)
+	err = ioutil.WriteFile(copyImgPath, imgContent, 0777)
+	if err != nil {
+		return fmt.Errorf("error copying file %s: %v", fileDestDir, err)
+	}
+
+	slog.Info("image copied", slog.String("path", copyImgPath))
+
+	return nil
 }
 
 // validateDir validates if the dirPath is really a dir
