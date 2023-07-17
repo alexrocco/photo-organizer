@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"io/ioutil"
@@ -104,20 +105,52 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 		slog.String("origImgPath", origImgPath),
 	)
 
-	imgName := fmt.Sprintf("%s-%s%s",
-		imgExif.TimeDate.Format("2006-01-02-030405"),
-		strings.ToLower(strings.Trim(imgExif.Model, "\"")),
-		strings.ToLower(path.Ext(origImgPath)),
-	)
-
 	fileDestDir := fmt.Sprintf("%s/%s", destDir, imgDestDir)
 	err = os.MkdirAll(fileDestDir, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("error crating the dir %s: %v", fileDestDir, err)
 	}
 
-	copyImgPath := fmt.Sprintf("%s/%s", fileDestDir, imgName)
-	err = ioutil.WriteFile(copyImgPath, imgContent, 0777)
+	// starts with negative as the loop will bump it
+	fileCounter := -1
+	var imgName, copyImgPath string
+	// sets that the file exists to start the loop
+	imgExists := true
+	// flag that checks if the image already exists with different name
+	// this is useful when running this same
+	hasSameContent := false
+	for imgExists && !hasSameContent {
+		fileCounter++
+		imgName = fmt.Sprintf("%s-%s-%02d%s",
+			imgExif.TimeDate.Format("2006-01-02-030405"),
+			strings.ToLower(imgExif.Model),
+			fileCounter,
+			strings.ToLower(path.Ext(origImgPath)),
+		)
+
+		copyImgPath = fmt.Sprintf("%s/%s", fileDestDir, imgName)
+
+		imgExists = fileExists(copyImgPath)
+
+		if imgExists {
+			hasSameContent, err = sameContent(copyImgPath, origImgPath)
+			if err != nil {
+				return fmt.Errorf("error comparing files: %s with %s: %v", copyImgPath, origImgPath, err)
+			}
+		}
+	}
+
+	if hasSameContent {
+		slog.Warn("image skipped as already exists",
+			slog.String("path", copyImgPath),
+			slog.Int("workerId", workerId),
+			slog.String("origImgPath", origImgPath),
+		)
+
+		return nil
+	}
+
+	err = ioutil.WriteFile(copyImgPath, imgContent, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("error copying file %s: %v", fileDestDir, err)
 	}
@@ -143,4 +176,29 @@ func validateDir(dirPath string) {
 		log.Printf("path %s not a dir", dirPath)
 		os.Exit(1)
 	}
+}
+
+// fileExists checks if the file exists in the file system.
+func fileExists(filePath string) bool {
+	info, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		return false
+	}
+
+	return !info.IsDir()
+}
+
+// sameContent checks if the files have the same content.
+func sameContent(fileA string, fileB string) (bool, error) {
+	contentA, err := ioutil.ReadFile(fileA)
+	if err != nil {
+		return false, fmt.Errorf("error reading the file %s: %v", fileA, err)
+	}
+
+	contentB, err := ioutil.ReadFile(fileB)
+	if err != nil {
+		return false, fmt.Errorf("error reading the file %s: %v", fileB, err)
+	}
+
+	return bytes.Equal(contentA, contentB), nil
 }

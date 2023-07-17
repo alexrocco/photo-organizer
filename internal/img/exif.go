@@ -28,7 +28,7 @@ func ExtractExif(imgContent []byte) (Exif, error) {
 		return Exif{}, fmt.Errorf("error getting model from EXIF: %v", err)
 	}
 
-	dateTime, err := exifF.Get(exif.DateTime)
+	dateTime, err := exifF.Get(exif.DateTimeOriginal)
 	if err != nil {
 		return Exif{}, fmt.Errorf("error getting date and time from EXIF: %v", err)
 	}
@@ -40,6 +40,7 @@ func ExtractExif(imgContent []byte) (Exif, error) {
 
 	// Leave only a-z, A-Z, and 0-9 chars
 	modelFormatted := regexp.MustCompile(`[^a-zA-Z0-9]+`).ReplaceAllString(model.String(), "")
+	modelFormatted = strings.Trim(modelFormatted, "\"")
 
 	return Exif{
 		Model:    modelFormatted,
