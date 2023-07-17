@@ -28,7 +28,7 @@ func main() {
 
 	imgPaths := []string{}
 
-	err := filepath.WalkDir(sourceDir, func(p string, entry fs.DirEntry, _ error) error {
+	_ = filepath.WalkDir(sourceDir, func(p string, entry fs.DirEntry, _ error) error {
 		if entry.IsDir() {
 			slog.Info("path is a dir, skipping", slog.String("path", p))
 			return nil
@@ -45,18 +45,38 @@ func main() {
 
 		return nil
 	})
-	if err != nil {
-		log.Fatalf("\n %v", err)
+
+	numWorkers := 2
+
+	jobs := make(chan string, len(imgPaths))
+	errors := make(chan error, len(imgPaths))
+
+	for i := 0; i < numWorkers; i++ {
+		go func(workerId int, jobs <-chan string, destDir string, errors chan<- error) {
+			for j := range jobs {
+				err := copyImage(j, destDir, workerId)
+				errors <- err
+			}
+		}(i, jobs, destDir, errors)
 	}
 
-	for _, imgPath := range imgPaths {
-		copyImage(imgPath, destDir)
+	for j := 0; j < len(imgPaths); j++ {
+		jobs <- imgPaths[j]
 	}
+	close(jobs)
+
+	for a := 1; a <= len(imgPaths); a++ {
+		err := <-errors
+		if err != nil {
+			slog.Error(fmt.Sprintf("error msg: %v", err))
+		}
+	}
+
 }
 
 // copyImage copy the image to the destination directory,
 // with the standard name and directory structure.
-func copyImage(origImgPath string, destDir string) error {
+func copyImage(origImgPath string, destDir string, workerId int) error {
 	imgContent, err := ioutil.ReadFile(origImgPath)
 	if err != nil {
 		return fmt.Errorf("error opening image %s: %v", origImgPath, err)
@@ -67,13 +87,22 @@ func copyImage(origImgPath string, destDir string) error {
 		return fmt.Errorf("error extracting image EXIF: %v", err)
 	}
 
-	slog.Info("image EXIF", slog.String("model", imgExif.Model), slog.Any("date", imgExif.TimeDate))
+	slog.Info("image EXIF",
+		slog.String("model", imgExif.Model),
+		slog.Any("date", imgExif.TimeDate),
+		slog.Int("workerId", workerId),
+		slog.String("origImgPath", origImgPath),
+	)
 
 	year := imgExif.TimeDate.Year()
 	month := fmt.Sprintf("%02d", imgExif.TimeDate.Month())
 	imgDestDir := fmt.Sprintf("%d/%s", year, month)
 
-	slog.Info("final destination", slog.String("path", imgDestDir))
+	slog.Info("final destination",
+		slog.String("path", imgDestDir),
+		slog.Int("workerId", workerId),
+		slog.String("origImgPath", origImgPath),
+	)
 
 	imgName := fmt.Sprintf("%s-%s%s",
 		imgExif.TimeDate.Format("2006-01-02-030405"),
@@ -93,7 +122,11 @@ func copyImage(origImgPath string, destDir string) error {
 		return fmt.Errorf("error copying file %s: %v", fileDestDir, err)
 	}
 
-	slog.Info("image copied", slog.String("path", copyImgPath))
+	slog.Info("image copied",
+		slog.String("path", copyImgPath),
+		slog.Int("workerId", workerId),
+		slog.String("origImgPath", origImgPath),
+	)
 
 	return nil
 }
