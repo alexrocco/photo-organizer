@@ -1,16 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"io/fs"
-	"io/ioutil"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/alexrocco/photo-organizer/internal/filehandle"
 	"github.com/alexrocco/photo-organizer/internal/img"
 	"golang.org/x/exp/slices"
 	"golang.org/x/exp/slog"
@@ -20,10 +18,16 @@ var imageExts = []string{".JPG", ".ARW"}
 
 func main() {
 	sourceDir := os.Args[1]
-	validateDir(sourceDir)
+	if ok, err := filehandle.DirExists(sourceDir); !ok || err != nil {
+		slog.Error("source dir does not exist or has an error", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	destDir := os.Args[2]
-	validateDir(destDir)
+	if ok, err := filehandle.DirExists(destDir); !ok || err != nil {
+		slog.Error("destination dir does not exist or has an error", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	slog.Info("starting", slog.String("source", sourceDir), slog.String("destination", destDir))
 
@@ -47,7 +51,7 @@ func main() {
 		return nil
 	})
 
-	numWorkers := 2
+	numWorkers := 8
 
 	jobs := make(chan string, len(imgPaths))
 	errors := make(chan error, len(imgPaths))
@@ -78,7 +82,7 @@ func main() {
 // copyImage copy the image to the destination directory,
 // with the standard name and directory structure.
 func copyImage(origImgPath string, destDir string, workerId int) error {
-	imgContent, err := ioutil.ReadFile(origImgPath)
+	imgContent, err := os.ReadFile(origImgPath)
 	if err != nil {
 		return fmt.Errorf("error opening image %s: %v", origImgPath, err)
 	}
@@ -130,10 +134,10 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 
 		copyImgPath = fmt.Sprintf("%s/%s", fileDestDir, imgName)
 
-		imgExists = fileExists(copyImgPath)
+		imgExists = filehandle.FileExists(copyImgPath)
 
 		if imgExists {
-			hasSameContent, err = sameContent(copyImgPath, origImgPath)
+			hasSameContent, err = filehandle.SameContent(copyImgPath, origImgPath)
 			if err != nil {
 				return fmt.Errorf("error comparing files: %s with %s: %v", copyImgPath, origImgPath, err)
 			}
@@ -150,7 +154,7 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 		return nil
 	}
 
-	err = ioutil.WriteFile(copyImgPath, imgContent, os.ModePerm)
+	err = os.WriteFile(copyImgPath, imgContent, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("error copying file %s: %v", fileDestDir, err)
 	}
@@ -162,43 +166,4 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 	)
 
 	return nil
-}
-
-// validateDir validates if the dirPath is really a dir
-func validateDir(dirPath string) {
-	fileInfo, err := os.Stat(dirPath)
-	if err != nil {
-		log.Printf("path %s not found", dirPath)
-		os.Exit(1)
-	}
-
-	if !fileInfo.IsDir() {
-		log.Printf("path %s not a dir", dirPath)
-		os.Exit(1)
-	}
-}
-
-// fileExists checks if the file exists in the file system.
-func fileExists(filePath string) bool {
-	info, err := os.Stat(filePath)
-	if os.IsNotExist(err) {
-		return false
-	}
-
-	return !info.IsDir()
-}
-
-// sameContent checks if the files have the same content.
-func sameContent(fileA string, fileB string) (bool, error) {
-	contentA, err := ioutil.ReadFile(fileA)
-	if err != nil {
-		return false, fmt.Errorf("error reading the file %s: %v", fileA, err)
-	}
-
-	contentB, err := ioutil.ReadFile(fileB)
-	if err != nil {
-		return false, fmt.Errorf("error reading the file %s: %v", fileB, err)
-	}
-
-	return bytes.Equal(contentA, contentB), nil
 }
