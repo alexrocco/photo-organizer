@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -51,7 +52,9 @@ func main() {
 		return nil
 	})
 
-	numWorkers := 8
+	slog.Info("images found", slog.Int("number", len(imgPaths)))
+
+	numWorkers := 2
 
 	jobs := make(chan string, len(imgPaths))
 	errors := make(chan error, len(imgPaths))
@@ -157,6 +160,24 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 	err = os.WriteFile(copyImgPath, imgContent, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("error copying file %s: %v", fileDestDir, err)
+	}
+
+	wImgContent, err := os.ReadFile(copyImgPath)
+	if err != nil {
+		return fmt.Errorf("error reading image just written %s: %v", copyImgPath, err)
+	}
+
+	// Check if the image written has the same content of the origin image
+	if !bytes.Equal(wImgContent, imgContent) {
+		slog.Warn("deleting image as the content is not equal",
+			slog.String("path", copyImgPath),
+			slog.Int("workerId", workerId),
+			slog.String("origImgPath", origImgPath),
+		)
+		err = os.Remove(copyImgPath)
+		if err != nil {
+			return fmt.Errorf("error deleting image not copied correctly %s: %v", copyImgPath, err)
+		}
 	}
 
 	slog.Info("image copied",
