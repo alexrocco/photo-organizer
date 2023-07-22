@@ -19,6 +19,7 @@ import (
 var imageExts = []string{".JPG", ".ARW"}
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	sourceDirFlag := flag.String("source-dir", "", "source directory to copy from")
 	destDirFlag := flag.String("dest-dir", "", "destination directory to copy to")
@@ -26,12 +27,12 @@ func main() {
 	flag.Parse()
 
 	if ok, err := filehandle.DirExists(*sourceDirFlag); !ok || err != nil {
-		slog.Error("source dir does not exist or has an error", slog.Any("error", err))
+		logger.Error("source dir does not exist or has an error", slog.Any("error", err))
 		os.Exit(1)
 	}
 
 	if ok, err := filehandle.DirExists(*destDirFlag); !ok || err != nil {
-		slog.Error("destination dir does not exist or has an error", slog.Any("error", err))
+		logger.Error("destination dir does not exist or has an error", slog.Any("error", err))
 		os.Exit(1)
 	}
 
@@ -39,20 +40,20 @@ func main() {
 	destDir := *destDirFlag
 	numWorkers := *numWorkersFlag
 
-	slog.Info("starting", slog.String("source", sourceDir), slog.String("destination", destDir))
+	logger.Info("starting", slog.String("source", sourceDir), slog.String("destination", destDir))
 
 	imgPaths := []string{}
 
 	_ = filepath.WalkDir(sourceDir, func(p string, entry fs.DirEntry, _ error) error {
 		if entry.IsDir() {
-			slog.Info("path is a dir, skipping", slog.String("path", p))
+			logger.Info("path is a dir, skipping", slog.String("path", p))
 			return nil
 		}
 
 		fileExt := path.Ext(entry.Name())
 
 		if !slices.Contains(imageExts, strings.ToUpper(fileExt)) {
-			slog.Warn("file extension not an image, skipping", slog.String("extension", fileExt))
+			logger.Warn("file extension not an image, skipping", slog.String("extension", fileExt))
 			return nil
 		}
 
@@ -61,18 +62,18 @@ func main() {
 		return nil
 	})
 
-	slog.Info("images found", slog.Int("number", len(imgPaths)))
+	logger.Info("images found", slog.Int("number", len(imgPaths)))
 
 	jobs := make(chan string, len(imgPaths))
 	errors := make(chan error, len(imgPaths))
 
 	for i := 0; i < numWorkers; i++ {
-		go func(workerId int, jobs <-chan string, destDir string, errors chan<- error) {
+		go func(workerId int, jobs <-chan string, destDir string, errors chan<- error, logger *slog.Logger) {
 			for j := range jobs {
-				err := copyImage(j, destDir, workerId)
+				err := copyImage(j, destDir, workerId, logger)
 				errors <- err
 			}
-		}(i, jobs, destDir, errors)
+		}(i, jobs, destDir, errors, logger)
 	}
 
 	for j := 0; j < len(imgPaths); j++ {
@@ -83,7 +84,7 @@ func main() {
 	for a := 1; a <= len(imgPaths); a++ {
 		err := <-errors
 		if err != nil {
-			slog.Error(fmt.Sprintf("error msg: %v", err))
+			logger.Error(fmt.Sprintf("error msg: %v", err))
 		}
 	}
 
@@ -91,7 +92,7 @@ func main() {
 
 // copyImage copy the image to the destination directory,
 // with the standard name and directory structure.
-func copyImage(origImgPath string, destDir string, workerId int) error {
+func copyImage(origImgPath string, destDir string, workerId int, logger *slog.Logger) error {
 	imgContent, err := os.ReadFile(origImgPath)
 	if err != nil {
 		return fmt.Errorf("error opening image %s: %v", origImgPath, err)
@@ -102,7 +103,7 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 		return fmt.Errorf("error extracting image EXIF: %v", err)
 	}
 
-	slog.Info("image EXIF",
+	logger.Info("image EXIF",
 		slog.String("model", imgExif.Model),
 		slog.Any("date", imgExif.TimeDate),
 		slog.Int("workerId", workerId),
@@ -113,7 +114,7 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 	month := fmt.Sprintf("%02d", imgExif.TimeDate.Month())
 	imgDestDir := fmt.Sprintf("%d/%s", year, month)
 
-	slog.Info("final destination",
+	logger.Info("final destination",
 		slog.String("path", imgDestDir),
 		slog.Int("workerId", workerId),
 		slog.String("origImgPath", origImgPath),
@@ -155,7 +156,7 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 	}
 
 	if hasSameContent {
-		slog.Warn("image skipped as already exists",
+		logger.Warn("image skipped as already exists",
 			slog.String("path", copyImgPath),
 			slog.Int("workerId", workerId),
 			slog.String("origImgPath", origImgPath),
@@ -176,7 +177,7 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 
 	// Check if the image written has the same content of the origin image
 	if !bytes.Equal(wImgContent, imgContent) {
-		slog.Warn("deleting image as the content is not equal",
+		logger.Warn("deleting image as the content is not equal",
 			slog.String("path", copyImgPath),
 			slog.Int("workerId", workerId),
 			slog.String("origImgPath", origImgPath),
@@ -187,7 +188,7 @@ func copyImage(origImgPath string, destDir string, workerId int) error {
 		}
 	}
 
-	slog.Info("image copied",
+	logger.Info("image copied",
 		slog.String("path", copyImgPath),
 		slog.Int("workerId", workerId),
 		slog.String("origImgPath", origImgPath),
