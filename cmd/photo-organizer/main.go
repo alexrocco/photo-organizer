@@ -22,7 +22,7 @@ func main() {
 
 	sourceDirFlag := flag.String("source-dir", "", "source directory to copy from")
 	destDirFlag := flag.String("dest-dir", "", "destination directory to copy to")
-	numWorkersFlag := flag.Int("num-workers", 2, "number of concurrent workers to copy the images")
+	numWorkersFlag := flag.Int("num-workers", 2, "number of parallel workers to copy the images")
 	flag.Parse()
 
 	if ok, err := filehandle.DirExists(*sourceDirFlag); !ok || err != nil {
