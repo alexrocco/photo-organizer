@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -18,17 +19,25 @@ import (
 var imageExts = []string{".JPG", ".ARW"}
 
 func main() {
-	sourceDir := os.Args[1]
-	if ok, err := filehandle.DirExists(sourceDir); !ok || err != nil {
+
+	sourceDirFlag := flag.String("source-dir", "", "source directory to copy from")
+	destDirFlag := flag.String("dest-dir", "", "destination directory to copy to")
+	numWorkersFlag := flag.Int("num-workers", 2, "number of concurrent workers to copy the images")
+	flag.Parse()
+
+	if ok, err := filehandle.DirExists(*sourceDirFlag); !ok || err != nil {
 		slog.Error("source dir does not exist or has an error", slog.Any("error", err))
 		os.Exit(1)
 	}
 
-	destDir := os.Args[2]
-	if ok, err := filehandle.DirExists(destDir); !ok || err != nil {
+	if ok, err := filehandle.DirExists(*destDirFlag); !ok || err != nil {
 		slog.Error("destination dir does not exist or has an error", slog.Any("error", err))
 		os.Exit(1)
 	}
+
+	sourceDir := *sourceDirFlag
+	destDir := *destDirFlag
+	numWorkers := *numWorkersFlag
 
 	slog.Info("starting", slog.String("source", sourceDir), slog.String("destination", destDir))
 
@@ -53,8 +62,6 @@ func main() {
 	})
 
 	slog.Info("images found", slog.Int("number", len(imgPaths)))
-
-	numWorkers := 2
 
 	jobs := make(chan string, len(imgPaths))
 	errors := make(chan error, len(imgPaths))
