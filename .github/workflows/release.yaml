@@ -12,9 +12,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
-      - name: Create dist dir
+
+      - name: Get Go version
+        id: go-version
         run: |
-          mkdir -p dist
+          cat .tool-versions | awk '{print $2} >> 
+          echo "version=$(cat .tool-versions | awk '{print $2})" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ steps.go-version.outputs.version }}
+        
       - name: Generate build files
         uses: thatisuday/go-cross-build@v1
         with:
