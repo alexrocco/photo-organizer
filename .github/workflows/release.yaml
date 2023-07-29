@@ -12,6 +12,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+      - name: Create dist dir
+        run: |
+          mkdir -p dist
       - name: Generate build files
         uses: thatisuday/go-cross-build@v1
         with:
