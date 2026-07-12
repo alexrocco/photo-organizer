@@ -1,8 +1,8 @@
 package img
 
 import (
-	"bytes"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -17,8 +17,11 @@ type Exif struct {
 	TimeDate time.Time
 }
 
-func ExtractExif(imgContent []byte) (Exif, error) {
-	exifF, err := exif.Decode(bytes.NewReader(imgContent))
+// ExtractExif decodes the Model and original date/time from the EXIF metadata
+// read from r. r may be a bounded reader over just the file header; goexif only
+// consumes what it needs to reach those tags.
+func ExtractExif(r io.Reader) (Exif, error) {
+	exifF, err := exif.Decode(r)
 	if err != nil {
 		return Exif{}, fmt.Errorf("error decoding image: %v", err)
 	}
