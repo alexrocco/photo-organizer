@@ -145,71 +145,83 @@ func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int
 	model := strings.ToLower(imgExif.Model)
 	ext := strings.ToLower(path.Ext(origImgPath))
 
-	var copyImgPath string
 	for fileCounter := 0; ; fileCounter++ {
 		imgName := fmt.Sprintf("%s-%s-%02d%s", baseName, model, fileCounter, ext)
-		copyImgPath = fmt.Sprintf("%s/%s", fileDestDir, imgName)
+		copyImgPath := fmt.Sprintf("%s/%s", fileDestDir, imgName)
 
-		if !filehandle.FileExists(copyImgPath) {
-			break // free slot -> this is a new image, copy it below
-		}
-
-		var sameContent bool
-		if verifyFull {
-			sameContent, err = filehandle.SameContent(copyImgPath, origImgPath)
-		} else {
-			sameContent, err = filehandle.SameFile(copyImgPath, origImgPath)
+		// Claim the slot atomically. O_EXCL guarantees exactly one worker
+		// creates a given name, so two workers can never both take the same
+		// counter for different same-second frames (which previously raced and
+		// lost files via the delete-on-mismatch path below).
+		dst, err := os.OpenFile(copyImgPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.ModePerm)
+		if os.IsExist(err) {
+			// Slot already taken (another worker or a previous run). Same file?
+			var sameContent bool
+			if verifyFull {
+				sameContent, err = filehandle.SameContent(copyImgPath, origImgPath)
+			} else {
+				sameContent, err = filehandle.SameFile(copyImgPath, origImgPath)
+			}
+			if err != nil {
+				return fmt.Errorf("error comparing files: %s with %s: %v", copyImgPath, origImgPath, err)
+			}
+			if sameContent {
+				logger.Warn("image skipped as already exists",
+					slog.String("path", copyImgPath),
+					slog.Int("workerId", workerId),
+					slog.String("origImgPath", origImgPath),
+				)
+				return nil
+			}
+			continue // a different image holds this slot, try the next counter
 		}
 		if err != nil {
-			return fmt.Errorf("error comparing files: %s with %s: %v", copyImgPath, origImgPath, err)
+			return fmt.Errorf("error creating %s: %v", copyImgPath, err)
 		}
 
-		if sameContent {
-			logger.Warn("image skipped as already exists",
+		// We exclusively own a fresh slot: read the source and write it in.
+		imgContent, err := os.ReadFile(origImgPath)
+		if err != nil {
+			dst.Close()
+			os.Remove(copyImgPath)
+			return fmt.Errorf("error opening image %s: %v", origImgPath, err)
+		}
+		if _, err := dst.Write(imgContent); err != nil {
+			dst.Close()
+			os.Remove(copyImgPath)
+			return fmt.Errorf("error copying file %s: %v", copyImgPath, err)
+		}
+		if err := dst.Close(); err != nil {
+			os.Remove(copyImgPath)
+			return fmt.Errorf("error closing %s: %v", copyImgPath, err)
+		}
+
+		// Verify what landed matches the source. Deleting on mismatch is safe
+		// now: we are the sole owner of this path, so no other worker's file
+		// can be removed here.
+		wImgContent, err := os.ReadFile(copyImgPath)
+		if err != nil {
+			return fmt.Errorf("error reading image just written %s: %v", copyImgPath, err)
+		}
+		if !bytes.Equal(wImgContent, imgContent) {
+			logger.Warn("deleting image as the content is not equal",
 				slog.String("path", copyImgPath),
 				slog.Int("workerId", workerId),
 				slog.String("origImgPath", origImgPath),
 			)
-			return nil
+			if err := os.Remove(copyImgPath); err != nil {
+				return fmt.Errorf("error deleting image not copied correctly %s: %v", copyImgPath, err)
+			}
+			return fmt.Errorf("written image %s did not match source, removed", copyImgPath)
 		}
-	}
 
-	// New image: now read it in full and write it out.
-	imgContent, err := os.ReadFile(origImgPath)
-	if err != nil {
-		return fmt.Errorf("error opening image %s: %v", origImgPath, err)
-	}
-
-	err = os.WriteFile(copyImgPath, imgContent, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("error copying file %s: %v", fileDestDir, err)
-	}
-
-	wImgContent, err := os.ReadFile(copyImgPath)
-	if err != nil {
-		return fmt.Errorf("error reading image just written %s: %v", copyImgPath, err)
-	}
-
-	// Check if the image written has the same content of the origin image
-	if !bytes.Equal(wImgContent, imgContent) {
-		logger.Warn("deleting image as the content is not equal",
+		logger.Info("image copied",
 			slog.String("path", copyImgPath),
 			slog.Int("workerId", workerId),
 			slog.String("origImgPath", origImgPath),
 		)
-		err = os.Remove(copyImgPath)
-		if err != nil {
-			return fmt.Errorf("error deleting image not copied correctly %s: %v", copyImgPath, err)
-		}
+		return nil
 	}
-
-	logger.Info("image copied",
-		slog.String("path", copyImgPath),
-		slog.Int("workerId", workerId),
-		slog.String("origImgPath", origImgPath),
-	)
-
-	return nil
 }
 
 // extractExif reads EXIF from just the head of the file (exifHeaderBytes) to
