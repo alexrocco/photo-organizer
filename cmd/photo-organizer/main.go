@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,11 @@ import (
 )
 
 var imageExts = []string{".JPG", ".ARW"}
+
+// videoExts are imported too, but their metadata is read from the MP4
+// container instead of EXIF. Only GoPro MP4s are supported; the low-res .LRV
+// proxies and .THM thumbnails GoPro writes next to them are skipped.
+var videoExts = []string{".MP4"}
 
 // exifHeaderBytes is how much of a file's head we read to extract EXIF on the
 // fast path. The Model and DateTimeOriginal tags live near the start of both
@@ -62,7 +68,7 @@ func main() {
 
 		fileExt := path.Ext(entry.Name())
 
-		if !slices.Contains(imageExts, strings.ToUpper(fileExt)) {
+		if !slices.Contains(imageExts, strings.ToUpper(fileExt)) && !slices.Contains(videoExts, strings.ToUpper(fileExt)) {
 			logger.Warn("file extension not an image, skipping", slog.String("extension", fileExt))
 			return nil
 		}
@@ -105,9 +111,10 @@ func main() {
 //
 // The already-imported case is resolved with cheap metadata (EXIF from the file
 // header, then a size + head/tail fingerprint comparison), so it does not read
-// the whole source or its destination twin. Only a genuinely new image is read
-// in full and written out. With verifyFull set, the dedup comparison falls back
-// to reading both files in full.
+// the whole source or its destination twin. Only a genuinely new image is
+// streamed to the destination (never held in memory, since GoPro videos are
+// multi-GB) and verified by checksum. With verifyFull set, the dedup comparison
+// falls back to comparing both files in full.
 func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int, logger *slog.Logger) error {
 	imgExif, err := extractExif(origImgPath)
 	if err != nil {
@@ -179,14 +186,18 @@ func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int
 			return fmt.Errorf("error creating %s: %v", copyImgPath, err)
 		}
 
-		// We exclusively own a fresh slot: read the source and write it in.
-		imgContent, err := os.ReadFile(origImgPath)
+		// We exclusively own a fresh slot: stream the source in, hashing it on
+		// the way through.
+		src, err := os.Open(origImgPath)
 		if err != nil {
 			dst.Close()
 			os.Remove(copyImgPath)
 			return fmt.Errorf("error opening image %s: %v", origImgPath, err)
 		}
-		if _, err := dst.Write(imgContent); err != nil {
+		srcHash := sha256.New()
+		_, err = io.Copy(io.MultiWriter(dst, srcHash), src)
+		src.Close()
+		if err != nil {
 			dst.Close()
 			os.Remove(copyImgPath)
 			return fmt.Errorf("error copying file %s: %v", copyImgPath, err)
@@ -199,11 +210,11 @@ func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int
 		// Verify what landed matches the source. Deleting on mismatch is safe
 		// now: we are the sole owner of this path, so no other worker's file
 		// can be removed here.
-		wImgContent, err := os.ReadFile(copyImgPath)
+		dstSum, err := filehandle.Hash(copyImgPath)
 		if err != nil {
 			return fmt.Errorf("error reading image just written %s: %v", copyImgPath, err)
 		}
-		if !bytes.Equal(wImgContent, imgContent) {
+		if !bytes.Equal(dstSum, srcHash.Sum(nil)) {
 			logger.Warn("deleting image as the content is not equal",
 				slog.String("path", copyImgPath),
 				slog.Int("workerId", workerId),
@@ -226,8 +237,18 @@ func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int
 
 // extractExif reads EXIF from just the head of the file (exifHeaderBytes) to
 // avoid loading whole multi-MB images, falling back to the full file if the
-// tags we need sit past that window.
+// tags we need sit past that window. Videos have no EXIF; their equivalent
+// metadata is read from the MP4 container.
 func extractExif(imgPath string) (img.Exif, error) {
+	if slices.Contains(videoExts, strings.ToUpper(path.Ext(imgPath))) {
+		f, err := os.Open(imgPath)
+		if err != nil {
+			return img.Exif{}, fmt.Errorf("error opening video %s: %v", imgPath, err)
+		}
+		defer f.Close()
+		return img.ExtractGoProMP4(f)
+	}
+
 	if e, err := extractExifLimited(imgPath, exifHeaderBytes); err == nil {
 		return e, nil
 	}

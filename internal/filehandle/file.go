@@ -32,20 +32,47 @@ func FileExists(filePath string) bool {
 	return !info.IsDir()
 }
 
-// SameContent checks if the files have the same content by reading both in
+// SameContent checks if the files have the same content by hashing both in
 // full. Exhaustive but expensive; used only when full verification is asked for.
+// Files are streamed, so multi-GB videos are never held in memory.
 func SameContent(fileA string, fileB string) (bool, error) {
-	contentA, err := os.ReadFile(fileA)
+	infoA, err := os.Stat(fileA)
 	if err != nil {
-		return false, fmt.Errorf("error reading the file %s: %v", fileA, err)
+		return false, fmt.Errorf("error stating %s: %v", fileA, err)
+	}
+	infoB, err := os.Stat(fileB)
+	if err != nil {
+		return false, fmt.Errorf("error stating %s: %v", fileB, err)
+	}
+	if infoA.Size() != infoB.Size() {
+		return false, nil
 	}
 
-	contentB, err := os.ReadFile(fileB)
+	sumA, err := Hash(fileA)
 	if err != nil {
-		return false, fmt.Errorf("error reading the file %s: %v", fileB, err)
+		return false, err
+	}
+	sumB, err := Hash(fileB)
+	if err != nil {
+		return false, err
 	}
 
-	return bytes.Equal(contentA, contentB), nil
+	return bytes.Equal(sumA, sumB), nil
+}
+
+// Hash returns the SHA-256 of the whole file, streaming it from disk.
+func Hash(filePath string) ([]byte, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening %s: %v", filePath, err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, fmt.Errorf("error reading %s: %v", filePath, err)
+	}
+	return h.Sum(nil), nil
 }
 
 // SameFile reports whether dst and src are (to a very high certainty) the same
