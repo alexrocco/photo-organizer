@@ -21,10 +21,16 @@ import (
 
 var imageExts = []string{".JPG", ".ARW"}
 
-// videoExts are imported too, but their metadata is read from the MP4
-// container instead of EXIF. Only GoPro MP4s are supported; the low-res .LRV
-// proxies and .THM thumbnails GoPro writes next to them are skipped.
+// videoExts are imported too when -video-dest-dir is set, but their metadata is
+// read from the MP4 container instead of EXIF. Only GoPro MP4s are supported;
+// the low-res .LRV proxies and .THM thumbnails GoPro writes next to them are
+// skipped. Unlike images, videos keep their original camera file name and go
+// flat into the video destination (the existing layout of the video library).
 var videoExts = []string{".MP4"}
+
+func isVideo(p string) bool {
+	return slices.Contains(videoExts, strings.ToUpper(path.Ext(p)))
+}
 
 // exifHeaderBytes is how much of a file's head we read to extract EXIF on the
 // fast path. The Model and DateTimeOriginal tags live near the start of both
@@ -37,6 +43,7 @@ func main() {
 
 	sourceDirFlag := flag.String("source-dir", "", "source directory to copy from")
 	destDirFlag := flag.String("dest-dir", "", "destination directory to copy to")
+	videoDestDirFlag := flag.String("video-dest-dir", "", "destination directory for videos, copied flat with their original names (videos are skipped when unset)")
 	numWorkersFlag := flag.Int("num-workers", 2, "number of parallel workers to copy the images")
 	verifyFullFlag := flag.Bool("verify-full", false, "compare full file contents when deduping (slower; default compares size + head/tail fingerprint)")
 	flag.Parse()
@@ -51,12 +58,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *videoDestDirFlag != "" {
+		if ok, err := filehandle.DirExists(*videoDestDirFlag); !ok || err != nil {
+			logger.Error("video destination dir does not exist or has an error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}
+
 	sourceDir := *sourceDirFlag
 	destDir := *destDirFlag
+	videoDestDir := *videoDestDirFlag
 	numWorkers := *numWorkersFlag
 	verifyFull := *verifyFullFlag
 
-	logger.Info("starting", slog.String("source", sourceDir), slog.String("destination", destDir))
+	logger.Info("starting", slog.String("source", sourceDir), slog.String("destination", destDir), slog.String("videoDestination", videoDestDir))
 
 	imgPaths := []string{}
 
@@ -68,8 +83,13 @@ func main() {
 
 		fileExt := path.Ext(entry.Name())
 
-		if !slices.Contains(imageExts, strings.ToUpper(fileExt)) && !slices.Contains(videoExts, strings.ToUpper(fileExt)) {
+		if !slices.Contains(imageExts, strings.ToUpper(fileExt)) && !isVideo(p) {
 			logger.Warn("file extension not an image, skipping", slog.String("extension", fileExt))
+			return nil
+		}
+
+		if isVideo(p) && videoDestDir == "" {
+			logger.Warn("no video destination dir set, skipping video", slog.String("path", p))
 			return nil
 		}
 
@@ -84,12 +104,12 @@ func main() {
 	errors := make(chan error, len(imgPaths))
 
 	for i := 0; i < numWorkers; i++ {
-		go func(workerId int, jobs <-chan string, destDir string, verifyFull bool, errors chan<- error, logger *slog.Logger) {
+		go func(workerId int, jobs <-chan string, destDir string, videoDestDir string, verifyFull bool, errors chan<- error, logger *slog.Logger) {
 			for j := range jobs {
-				err := copyImage(j, destDir, verifyFull, workerId, logger)
+				err := copyImage(j, destDir, videoDestDir, verifyFull, workerId, logger)
 				errors <- err
 			}
-		}(i, jobs, destDir, verifyFull, errors, logger)
+		}(i, jobs, destDir, videoDestDir, verifyFull, errors, logger)
 	}
 
 	for j := 0; j < len(imgPaths); j++ {
@@ -107,7 +127,8 @@ func main() {
 }
 
 // copyImage copy the image to the destination directory,
-// with the standard name and directory structure.
+// with the standard name and directory structure. Videos instead go flat into
+// videoDestDir under their original file name.
 //
 // The already-imported case is resolved with cheap metadata (EXIF from the file
 // header, then a size + head/tail fingerprint comparison), so it does not read
@@ -115,7 +136,7 @@ func main() {
 // streamed to the destination (never held in memory, since GoPro videos are
 // multi-GB) and verified by checksum. With verifyFull set, the dedup comparison
 // falls back to comparing both files in full.
-func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int, logger *slog.Logger) error {
+func copyImage(origImgPath string, destDir string, videoDestDir string, verifyFull bool, workerId int, logger *slog.Logger) error {
 	imgExif, err := extractExif(origImgPath)
 	if err != nil {
 		return fmt.Errorf("error extracting image EXIF: %v", err)
@@ -128,17 +149,42 @@ func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int
 		slog.String("origImgPath", origImgPath),
 	)
 
-	year := imgExif.TimeDate.Year()
-	month := fmt.Sprintf("%02d", imgExif.TimeDate.Month())
-	imgDestDir := fmt.Sprintf("%d/%s", year, month)
+	var fileDestDir string
+	var slotName func(fileCounter int) string
+
+	if isVideo(origImgPath) {
+		// Keep the camera's name (GX010182.MP4). Cameras reuse names (counter
+		// resets, several cameras), so a different clip already holding the name
+		// gets a counter suffix: GX010182-01.MP4.
+		fileDestDir = videoDestDir
+		origName := path.Base(origImgPath)
+		ext := path.Ext(origName)
+		stem := strings.TrimSuffix(origName, ext)
+		slotName = func(fileCounter int) string {
+			if fileCounter == 0 {
+				return origName
+			}
+			return fmt.Sprintf("%s-%02d%s", stem, fileCounter, ext)
+		}
+	} else {
+		year := imgExif.TimeDate.Year()
+		month := fmt.Sprintf("%02d", imgExif.TimeDate.Month())
+		fileDestDir = fmt.Sprintf("%s/%d/%s", destDir, year, month)
+
+		baseName := imgExif.TimeDate.Format("2006-01-02-030405")
+		model := strings.ToLower(imgExif.Model)
+		ext := strings.ToLower(path.Ext(origImgPath))
+		slotName = func(fileCounter int) string {
+			return fmt.Sprintf("%s-%s-%02d%s", baseName, model, fileCounter, ext)
+		}
+	}
 
 	logger.Info("final destination",
-		slog.String("path", imgDestDir),
+		slog.String("path", fileDestDir),
 		slog.Int("workerId", workerId),
 		slog.String("origImgPath", origImgPath),
 	)
 
-	fileDestDir := fmt.Sprintf("%s/%s", destDir, imgDestDir)
 	err = os.MkdirAll(fileDestDir, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("error crating the dir %s: %v", fileDestDir, err)
@@ -148,12 +194,8 @@ func copyImage(origImgPath string, destDir string, verifyFull bool, workerId int
 	// means it is already imported (skip); an existing slot holding a different
 	// file (same timestamp+model, e.g. a burst) means try the next counter; the
 	// first free slot is where a new image gets written.
-	baseName := imgExif.TimeDate.Format("2006-01-02-030405")
-	model := strings.ToLower(imgExif.Model)
-	ext := strings.ToLower(path.Ext(origImgPath))
-
 	for fileCounter := 0; ; fileCounter++ {
-		imgName := fmt.Sprintf("%s-%s-%02d%s", baseName, model, fileCounter, ext)
+		imgName := slotName(fileCounter)
 		copyImgPath := fmt.Sprintf("%s/%s", fileDestDir, imgName)
 
 		// Claim the slot atomically. O_EXCL guarantees exactly one worker
